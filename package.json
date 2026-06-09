@@ -1,0 +1,26 @@
+{
+  "name": "ts-agent-core",
+  "version": "1.0.0",
+  "description": "从零搭一个 TypeScript Agent 运行时核心 - 主干项目",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./*": "./dist/*.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.2",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}
