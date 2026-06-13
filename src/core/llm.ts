@@ -14,6 +14,8 @@ import type { ToolMetadata } from './tool.js';
 /** LLM 请求参数 */
 export interface LLMRequest {
   messages: Message[];
+  /** 模型名称（如 'gpt-4o'、'claude-3-5-sonnet'），Provider 用此选择后端 */
+  model?: string;
   tools?: ToolMetadata[];
   /** tool_choice，可选 */
   toolChoice?: 'auto' | 'none' | 'required';

@@ -8,15 +8,22 @@
 export type {
   MessageRole,
   ToolCall,
-  ToolResult as ToolCallResult,
+
   Message,
   ConversationContext,
+  MessageValidation,
+  TrimStrategy,
 } from './message.js';
 export {
   systemMessage,
   userMessage,
   assistantMessage,
   toolResultMessage,
+  validateMessage,
+  validateConversation,
+  TokenEstimator,
+  defaultTokenEstimator,
+  MessageWindow,
 } from './message.js';
 
 export type {
@@ -57,3 +64,15 @@ export type {
   SessionCheckpoint,
 } from './session.js';
 export { InMemorySession } from './session.js';
+
+export type {
+  OpenAIMessage,
+  AnthropicMessage,
+  AnthropicContent,
+} from './provider-adapter.js';
+export {
+  toOpenAIMessages,
+  fromOpenAIToolCalls,
+  toAnthropicMessages,
+  extractAnthropicSystemPrompt,
+} from './provider-adapter.js';

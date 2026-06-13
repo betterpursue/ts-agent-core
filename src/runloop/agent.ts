@@ -60,6 +60,7 @@ export class DefaultAgent implements Agent {
       // 调用 LLM
       const response = await this.config.model.provider.complete({
         messages,
+        model: this.config.model.model,
         tools: toolMetadatas.length > 0 ? toolMetadatas : undefined,
         maxTokens: this.config.model.maxTokens,
         temperature: this.config.model.temperature,
