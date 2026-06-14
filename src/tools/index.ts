@@ -10,11 +10,12 @@ export { CalculatorTool } from './calculator.js';
 export { FileReaderTool } from './file-reader.js';
 export {
   executeToolsParallel,
-  ToolNotFoundError,
   TimeoutError,
-  toolMetadataToJsonSchema,
+  hasConflict,
+  buildLayers,
 } from './parallel-executor.js';
 export type {
-  ParallelExecutionOptions,
   ParallelExecutionResult,
+  ToolCallRequest,
 } from './parallel-executor.js';
+export type { ParallelExecutionOptions } from '../core/agent.js';

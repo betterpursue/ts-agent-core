@@ -30,6 +30,7 @@ export type {
   ToolMetadata,
   ToolContext,
   ToolResult,
+  ToolDependency,
   Tool,
   ToolRegistry,
 } from './tool.js';
@@ -57,6 +58,7 @@ export type {
   AgentHooks,
   AgentResult,
   Agent,
+  ParallelExecutionOptions,
 } from './agent.js';
 
 export type {

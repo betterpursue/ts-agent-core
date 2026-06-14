@@ -13,6 +13,19 @@ import type { MemorySystem } from './memory.js';
 import type { ModelConfig } from './llm.js';
 
 /** Agent 配置 */
+/** 并行工具执行选项 */
+export interface ParallelExecutionOptions {
+  /** 最大并行数（默认 5） */
+  maxConcurrency?: number;
+  /** 单个工具的超时毫秒数（默认 30000） */
+  timeoutMs?: number;
+  /** 遇到第一个失败就 abort 全部 */
+  failFast?: boolean;
+  /** 启用依赖冲突检测和分层并行（默认 true） */
+  enableConflictDetection?: boolean;
+}
+
+/** Agent 配置 */
 export interface AgentConfig {
   name: string;
   model: ModelConfig;
@@ -20,6 +33,8 @@ export interface AgentConfig {
   tools: ToolRegistry;
   memory: MemorySystem;
   maxIterations?: number; // 单次执行最大循环轮数（防止死循环）
+  /** 并行执行配置。设置后启用并行工具执行，替代默认的串行执行 */
+  parallelExecution?: ParallelExecutionOptions;
 }
 
 /** Agent 生命周期钩子 —— 扩展点 */

@@ -18,6 +18,14 @@ export interface ToolMetadata {
   parameters: z.ZodSchema<unknown>;
 }
 
+/** Tool 依赖声明 —— 告诉运行时工具会访问哪些共享状态 */
+export interface ToolDependency {
+  /** 读取的共享状态键 */
+  reads?: string[];
+  /** 写入的共享状态键 */
+  writes?: string[];
+}
+
 /** Tool 执行上下文 —— 执行时可以获取的信息 */
 export interface ToolContext {
   /** 会话 ID（可用于追溯） */
@@ -39,9 +47,17 @@ export interface ToolResult {
  * Tool 接口 —— 所有工具必须实现此接口
  *
  * 后续新系列只要实现这个接口，注册到 ToolRegistry 即可使用。
+ *
+ * dependencies 字段是可选的依赖声明，用于并行执行时的冲突检测：
+ * - 两个工具如果写入同一个 key，它们不能并行执行
+ * - 一个工具读、另一个工具写同一个 key，也不能并行执行
+ * - 声明越精确，并行度越高
+ * - 不声明则默认不与任何工具冲突（可任意并行）
  */
 export interface Tool {
   metadata: ToolMetadata;
+  /** 可选的依赖声明，用于并行执行时的冲突检测 */
+  dependencies?: ToolDependency;
 
   /** 执行工具逻辑 */
   execute(args: Record<string, unknown>, ctx?: ToolContext): Promise<ToolResult>;
