@@ -12,11 +12,15 @@
 import type { Agent, AgentConfig, AgentResult, AgentHooks } from '../core/agent.js';
 import type { Message } from '../core/message.js';
 import { systemMessage, userMessage, assistantMessage } from '../core/message.js';
+import type { SessionCheckpoint } from '../core/session.js';
 import { executeToolsParallel } from '../tools/parallel-executor.js';
 
 export class DefaultAgent implements Agent {
   readonly config: AgentConfig;
   hooks?: AgentHooks;
+
+  /** 每个 session 的上次 checkpoint 消息数（用于 interval 策略） */
+  private lastCheckpointCounts: Map<string, number> = new Map();
 
   constructor(config: AgentConfig) {
     this.config = config;
@@ -25,21 +29,33 @@ export class DefaultAgent implements Agent {
   async run(input: string | Message[]): Promise<AgentResult> {
     const maxIterations = this.config.maxIterations ?? 10;
     const messages: Message[] = [];
+    const session = this.config.session;
 
-    // 1. 加载记忆中的历史对话作为上下文
+    // 1. 从 Session 加载已有消息（如果配置了持久化会话）
+    if (session) {
+      const sessionMessages = session.session.getMessages();
+      messages.push(...sessionMessages);
+    }
+
+    // 2. 加载记忆中的历史对话作为补充
     const history = this.config.memory.shortTerm.getMessages();
     messages.push(...history);
 
-    // 2. 系统提示词插到最前面
+    // 3. 系统提示词插到最前面
     if (this.config.systemPrompt) {
       messages.unshift(systemMessage(this.config.systemPrompt));
     }
 
-    // 3. 追加用户输入
+    // 4. 追加用户输入，同时写入 Session
     if (typeof input === 'string') {
-      messages.push(userMessage(input));
+      const userMsg = userMessage(input);
+      messages.push(userMsg);
+      session?.session.addMessage(userMsg);
     } else {
       messages.push(...input);
+      for (const msg of input) {
+        session?.session.addMessage(msg);
+      }
     }
 
     let iterations = 0;
@@ -94,6 +110,11 @@ export class DefaultAgent implements Agent {
         await this.hooks.onIterationComplete(iterations);
       }
 
+      // 如果配置了 checkpoint 策略，检查是否需要保存检查点
+      if (session?.checkpoints && session.checkpointTrigger) {
+        await this.maybeCheckpoint(session);
+      }
+
       // 没有 tool_calls → 最终答案，循环结束
       if (!response.toolCalls || response.toolCalls.length === 0) {
         break;
@@ -110,6 +131,31 @@ export class DefaultAgent implements Agent {
       this.config.memory.shortTerm.add(msg);
     }
 
+    // 同步到 Session：只同步本轮新产生的消息（从最后一条 user 消息之后）
+    // 避免重复写入已经在步骤 4 写过的 user 输入
+    if (session) {
+      // 找到本轮新增的消息（最后一条 user 之后的所有消息）
+      let lastUserIdx = -1;
+      for (let i = 0; i < messages.length; i++) {
+        if (messages[i].role === 'user' && messages[i].content !== '') {
+          lastUserIdx = i;
+        }
+      }
+      // 从最后一条 user 之后开始写入 session
+      const newSessionMessages = messages.slice(lastUserIdx + 1).filter(
+        (m) => m.role !== 'system'
+      );
+      for (const msg of newSessionMessages) {
+        session.session.addMessage(msg);
+      }
+
+      // 手动 checkpoint 策略：在 run() 结束时保存一个最终检查点
+      if (session.checkpoints && session.checkpointTrigger?.type === 'manual') {
+        const ckpt = session.session.checkpoint();
+        await session.checkpoints.saveCheckpoint(session.session.id, ckpt);
+      }
+    }
+
     return {
       messages,
       output: lastResponse,
@@ -121,6 +167,38 @@ export class DefaultAgent implements Agent {
 
   reset(): void {
     this.config.memory.shortTerm.clear();
+  }
+
+  /**
+   * 检查是否需要保存检查点
+   * 根据配置的 checkpointTrigger 策略决定是否保存
+   */
+  private async maybeCheckpoint(
+    session: NonNullable<AgentConfig['session']>
+  ): Promise<void> {
+    const trigger = session.checkpointTrigger!;
+
+    switch (trigger.type) {
+      case 'interval': {
+        const msgCount = session.session.getMessages().length;
+        const key = session.session.id;
+        const lastCount = this.lastCheckpointCounts.get(key) ?? 0;
+        if (msgCount - lastCount >= trigger.messageCount) {
+          const ckpt = session.session.checkpoint();
+          await session.checkpoints!.saveCheckpoint(session.session.id, ckpt);
+          this.lastCheckpointCounts.set(key, msgCount);
+        }
+        break;
+      }
+      case 'tool_call': {
+        // 工具调用后的 checkpoint 暂未实现
+        // 后续文章会通过 hooks 机制集成
+        break;
+      }
+      case 'manual':
+        // 手动模式，不做自动 checkpoint
+        break;
+    }
   }
 
   /**

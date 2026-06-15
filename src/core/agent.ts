@@ -11,6 +11,7 @@ import type { Message } from './message.js';
 import type { ToolRegistry } from './tool.js';
 import type { MemorySystem } from './memory.js';
 import type { ModelConfig } from './llm.js';
+import type { PersistentSession, CheckpointManager, CheckpointTrigger } from './session.js';
 
 /** Agent 配置 */
 /** 并行工具执行选项 */
@@ -35,6 +36,19 @@ export interface AgentConfig {
   maxIterations?: number; // 单次执行最大循环轮数（防止死循环）
   /** 并行执行配置。设置后启用并行工具执行，替代默认的串行执行 */
   parallelExecution?: ParallelExecutionOptions;
+  /**
+   * 会话配置（可选，不配置则无持久化）
+   *
+   * 配置后 Agent 会自动管理 Session 的加载和 checkpoint：
+   * - run() 开始时从 Session 加载已有消息
+   * - 运行过程中按 checkpointTrigger 策略自动保存 checkpoint
+   * - run() 结束后同步本轮对话到 Session
+   */
+  session?: {
+    session: PersistentSession;
+    checkpoints?: CheckpointManager;
+    checkpointTrigger?: CheckpointTrigger;
+  };
 }
 
 /** Agent 生命周期钩子 —— 扩展点 */

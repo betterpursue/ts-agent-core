@@ -64,8 +64,16 @@ export type {
 export type {
   Session,
   SessionCheckpoint,
+  PersistentSession,
+  CheckpointManager,
+  CheckpointTrigger,
 } from './session.js';
-export { InMemorySession } from './session.js';
+export {
+  InMemorySession,
+  FileSession,
+  FileCheckpointManager,
+  RetentionCheckpointManager,
+} from './session.js';
 
 export type {
   OpenAIMessage,

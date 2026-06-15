@@ -1,0 +1,9 @@
+feat: session persistence with FileSession, CheckpointManager, and Agent integration
+
+- Add PersistentSession interface extending Session with save()/load()
+- Implement FileSession with debounced async write-through
+- Add CheckpointManager interface and FileCheckpointManager
+- Add RetentionCheckpointManager decorator for auto-cleanup
+- Define CheckpointTrigger union type (interval/tool_call/manual)
+- Integrate session into DefaultAgent run loop with auto checkpointing
+- Track checkpoint state per session via private Map on Agent instance
