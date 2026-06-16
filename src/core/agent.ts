@@ -33,16 +33,11 @@ export interface AgentConfig {
   systemPrompt: string;
   tools: ToolRegistry;
   memory: MemorySystem;
-  maxIterations?: number; // 单次执行最大循环轮数（防止死循环）
+  maxIterations?: number;
   /** 并行执行配置。设置后启用并行工具执行，替代默认的串行执行 */
   parallelExecution?: ParallelExecutionOptions;
   /**
    * 会话配置（可选，不配置则无持久化）
-   *
-   * 配置后 Agent 会自动管理 Session 的加载和 checkpoint：
-   * - run() 开始时从 Session 加载已有消息
-   * - 运行过程中按 checkpointTrigger 策略自动保存 checkpoint
-   * - run() 结束后同步本轮对话到 Session
    */
   session?: {
     session: PersistentSession;
@@ -78,6 +73,47 @@ export interface AgentResult {
   stoppedEarly: boolean;
 }
 
+// ─── 流式输出 ────────────────────────────────────────────────────
+
+/**
+ * Agent 流式事件
+ *
+ * stream() 方法对每个事件类型调用 onEvent 回调。
+ * 事件按自然顺序出现：
+ *   1. contentDelta（LLM 逐字输出）
+ *   2. toolCall（LLM 决定调工具）
+ *   3. toolResult（工具执行完成）
+ *   4. iteration（一轮迭代完成）
+ *   5. done（全部完成，携带最终结果）
+ *   6. error（出错终止）
+ *
+ * contentDelta 和 toolCall 在同一轮迭代中是互斥的——
+ * LLM 要么输出文本，要么决定调工具，不会同时发生。
+ */
+export interface AgentStreamEvent {
+  /** LLM 文本输出的增量（逐 token/逐块） */
+  contentDelta?: string;
+  /** 工具调用信息（LLM 决定调工具时触发） */
+  toolCall?: {
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+  };
+  /** 工具执行结果 */
+  toolResult?: {
+    toolCallId: string;
+    toolName: string;
+    content: string;
+    isError: boolean;
+  };
+  /** 当前迭代轮次 */
+  iteration?: number;
+  /** 流结束，携带最终 AgentResult */
+  done?: AgentResult;
+  /** 流式传输中发生错误 */
+  error?: string;
+}
+
 /**
  * Agent 接口 —— 所有 Agent 实现必须满足此接口。
  * 后续系列可以基于此接口实现特殊 Agent（如 ReAct Agent、Plan-Act Agent 等）。
@@ -86,8 +122,24 @@ export interface Agent {
   readonly config: AgentConfig;
   hooks?: AgentHooks;
 
-  /** 执行一次完整对话（支持多轮 tool calling） */
+  /** 执行一次完整对话（支持多轮 tool calling），非流式 */
   run(input: string | Message[]): Promise<AgentResult>;
+
+  /**
+   * 流式执行
+   *
+   * 和 run() 的核心区别：
+   * - LLM 的输出不再一次性返回，而是通过 onEvent 逐块推送
+   * - 前端可以边接收边渲染，用户看到的是字符逐行出现的效果
+   * - 工具调用的开始和结束也有独立事件，方便 UI 展示"正在调用工具"的状态
+   *
+   * 实现了 Agent 级别的流式输出后，调用方不再需要自己拼 LLM 的流式输出。
+   * 只需要注册 onEvent 回调，处理不同类型的事件即可。
+   */
+  stream(
+    input: string | Message[],
+    onEvent: (event: AgentStreamEvent) => void
+  ): Promise<AgentResult>;
 
   /** 重置 Agent 状态 */
   reset(): void;

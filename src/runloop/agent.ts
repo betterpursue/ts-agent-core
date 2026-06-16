@@ -7,9 +7,10 @@
  * - 通过 Hooks 暴露扩展点，后续系列不需要修改核心
  * - 同一次 run() 内的消息用本地数组管理，不与记忆 eviction 策略耦合
  * - run() 结束后将对话同步到 ShortTermMemory，供下一次 run() 加载上下文
+ * - stream() 和 run() 共享同一套消息管理逻辑，区别仅在 LLM 调用方式
  */
 
-import type { Agent, AgentConfig, AgentResult, AgentHooks } from '../core/agent.js';
+import type { Agent, AgentConfig, AgentResult, AgentHooks, AgentStreamEvent } from '../core/agent.js';
 import type { Message } from '../core/message.js';
 import { systemMessage, userMessage, assistantMessage } from '../core/message.js';
 import type { SessionCheckpoint } from '../core/session.js';
@@ -27,17 +28,48 @@ export class DefaultAgent implements Agent {
   }
 
   async run(input: string | Message[]): Promise<AgentResult> {
+    return this.executeLoop(input, false);
+  }
+
+  async stream(
+    input: string | Message[],
+    onEvent: (event: AgentStreamEvent) => void
+  ): Promise<AgentResult> {
+    return this.executeLoop(input, true, onEvent);
+  }
+
+  reset(): void {
+    this.config.memory.shortTerm.clear();
+  }
+
+  /**
+   * 统一的执行循环
+   *
+   * run() 和 stream() 共享同一个核心循环。
+   * 区别只有两点：
+   * 1. LLM 调用方式：complete（非流式）vs completeStream（流式）
+   * 2. stream 模式下通过 onEvent 推送中间事件
+   *
+   * 这样设计保证了两个方法的行为一致性：
+   * - 工具调用、记忆同步、checkpoint 保存等逻辑完全复用
+   * - 不会出现"run 能用但 stream 有 bug"的情况
+   */
+  private async executeLoop(
+    input: string | Message[],
+    streaming: boolean,
+    onEvent?: (event: AgentStreamEvent) => void
+  ): Promise<AgentResult> {
     const maxIterations = this.config.maxIterations ?? 10;
     const messages: Message[] = [];
     const session = this.config.session;
 
-    // 1. 从 Session 加载已有消息（如果配置了持久化会话）
+    // 1. 从 Session 加载已有消息
     if (session) {
       const sessionMessages = session.session.getMessages();
       messages.push(...sessionMessages);
     }
 
-    // 2. 加载记忆中的历史对话作为补充
+    // 2. 加载记忆中的历史对话
     const history = this.config.memory.shortTerm.getMessages();
     messages.push(...history);
 
@@ -66,7 +98,6 @@ export class DefaultAgent implements Agent {
     while (iterations < maxIterations) {
       iterations++;
 
-      // 获取当前已注册的所有工具元数据（用于构建 function calling schema）
       const toolMetadatas = this.config.tools.listMetadata();
 
       // Hook: LLM 调用前
@@ -74,14 +105,34 @@ export class DefaultAgent implements Agent {
         await this.hooks.onBeforeLLMCall(messages);
       }
 
-      // 调用 LLM
-      const response = await this.config.model.provider.complete({
-        messages,
-        model: this.config.model.model,
-        tools: toolMetadatas.length > 0 ? toolMetadatas : undefined,
-        maxTokens: this.config.model.maxTokens,
-        temperature: this.config.model.temperature,
-      });
+      let response;
+
+      if (streaming && onEvent) {
+        // 流式模式：逐块推送 LLM 输出
+        response = await this.config.model.provider.completeStream(
+          {
+            messages,
+            model: this.config.model.model,
+            tools: toolMetadatas.length > 0 ? toolMetadatas : undefined,
+            maxTokens: this.config.model.maxTokens,
+            temperature: this.config.model.temperature,
+          },
+          (chunk) => {
+            if (chunk.contentDelta) {
+              onEvent({ contentDelta: chunk.contentDelta });
+            }
+          }
+        );
+      } else {
+        // 非流式模式
+        response = await this.config.model.provider.complete({
+          messages,
+          model: this.config.model.model,
+          tools: toolMetadatas.length > 0 ? toolMetadatas : undefined,
+          maxTokens: this.config.model.maxTokens,
+          temperature: this.config.model.temperature,
+        });
+      }
 
       // Hook: LLM 调用后
       if (this.hooks?.onAfterLLMCall) {
@@ -96,26 +147,44 @@ export class DefaultAgent implements Agent {
         assistantMessage(response.content, response.toolCalls)
       );
 
-      // 执行工具调用：并行（如果配置了）或串行（默认）
+      // 执行工具调用
       if (response.toolCalls && response.toolCalls.length > 0) {
+        // 推送 toolCall 事件
+        if (streaming && onEvent) {
+          for (const tc of response.toolCalls) {
+            onEvent({
+              toolCall: {
+                id: tc.id,
+                name: tc.name,
+                args: tc.args,
+              },
+            });
+          }
+        }
+
         if (this.config.parallelExecution) {
-          await this.executeToolCallsParallel(response.toolCalls, messages);
+          await this.executeToolCallsParallel(response.toolCalls, messages, streaming, onEvent);
         } else {
-          await this.executeToolCallsSequential(response.toolCalls, messages);
+          await this.executeToolCallsSequential(response.toolCalls, messages, streaming, onEvent);
         }
       }
 
-      // Hook: 每轮迭代完成（无论是否有工具调用，都会触发）
+      // 推送 iteration 事件
+      if (streaming && onEvent) {
+        onEvent({ iteration: iterations });
+      }
+
+      // Hook
       if (this.hooks?.onIterationComplete) {
         await this.hooks.onIterationComplete(iterations);
       }
 
-      // 如果配置了 checkpoint 策略，检查是否需要保存检查点
+      // Checkpoint
       if (session?.checkpoints && session.checkpointTrigger) {
         await this.maybeCheckpoint(session);
       }
 
-      // 没有 tool_calls → 最终答案，循环结束
+      // 没有 tool_calls → 最终答案
       if (!response.toolCalls || response.toolCalls.length === 0) {
         break;
       }
@@ -125,23 +194,20 @@ export class DefaultAgent implements Agent {
       stoppedEarly = true;
     }
 
-    // 将本轮对话写入短期记忆（排除 system prompt，因为每次 run() 都会重新 prepend）
+    // 将本轮对话写入短期记忆
     const conversationMessages = messages.filter((m) => m.role !== 'system');
     for (const msg of conversationMessages) {
       this.config.memory.shortTerm.add(msg);
     }
 
-    // 同步到 Session：只同步本轮新产生的消息（从最后一条 user 消息之后）
-    // 避免重复写入已经在步骤 4 写过的 user 输入
+    // 同步到 Session
     if (session) {
-      // 找到本轮新增的消息（最后一条 user 之后的所有消息）
       let lastUserIdx = -1;
       for (let i = 0; i < messages.length; i++) {
         if (messages[i].role === 'user' && messages[i].content !== '') {
           lastUserIdx = i;
         }
       }
-      // 从最后一条 user 之后开始写入 session
       const newSessionMessages = messages.slice(lastUserIdx + 1).filter(
         (m) => m.role !== 'system'
       );
@@ -149,29 +215,30 @@ export class DefaultAgent implements Agent {
         session.session.addMessage(msg);
       }
 
-      // 手动 checkpoint 策略：在 run() 结束时保存一个最终检查点
       if (session.checkpoints && session.checkpointTrigger?.type === 'manual') {
         const ckpt = session.session.checkpoint();
         await session.checkpoints.saveCheckpoint(session.session.id, ckpt);
       }
     }
 
-    return {
+    const result: AgentResult = {
       messages,
       output: lastResponse,
       iterations,
       totalTokens,
       stoppedEarly,
     };
-  }
 
-  reset(): void {
-    this.config.memory.shortTerm.clear();
+    // 推送 done 事件
+    if (streaming && onEvent) {
+      onEvent({ done: result });
+    }
+
+    return result;
   }
 
   /**
    * 检查是否需要保存检查点
-   * 根据配置的 checkpointTrigger 策略决定是否保存
    */
   private async maybeCheckpoint(
     session: NonNullable<AgentConfig['session']>
@@ -190,26 +257,20 @@ export class DefaultAgent implements Agent {
         }
         break;
       }
-      case 'tool_call': {
-        // 工具调用后的 checkpoint 暂未实现
-        // 后续文章会通过 hooks 机制集成
-        break;
-      }
+      case 'tool_call':
       case 'manual':
-        // 手动模式，不做自动 checkpoint
         break;
     }
   }
 
   /**
-   * 串行执行工具调用（默认模式）
-   *
-   * 逐个执行，每个工具的结果作为 tool result message 加入对话。
-   * 保持兼容性：这个执行方式在第 6 篇文章中详细解释过。
+   * 串行执行工具调用
    */
   private async executeToolCallsSequential(
     toolCalls: NonNullable<import('../core/message.js').ToolCall[]>,
-    messages: Message[]
+    messages: Message[],
+    streaming?: boolean,
+    onEvent?: (event: AgentStreamEvent) => void
   ): Promise<void> {
     for (const tc of toolCalls) {
       if (this.hooks?.onBeforeToolCall) {
@@ -244,6 +305,18 @@ export class DefaultAgent implements Agent {
         await this.hooks.onAfterToolCall(tc.name, resultContent);
       }
 
+      // 推送 toolResult 事件
+      if (streaming && onEvent) {
+        onEvent({
+          toolResult: {
+            toolCallId: tc.id,
+            toolName: tc.name,
+            content: resultContent,
+            isError,
+          },
+        });
+      }
+
       messages.push({
         role: 'tool',
         content: resultContent,
@@ -256,20 +329,12 @@ export class DefaultAgent implements Agent {
 
   /**
    * 并行执行工具调用
-   *
-   * 和串行版本的核心区别：
-   * 1. 所有工具同时触发执行（受 Semaphore 和依赖分析控制）
-   * 2. 工具结果可能会以不同的顺序返回（按执行完成时间）
-   * 3. 但推入消息列表时，仍然保持原始 tool_calls 的顺序
-   *    ——这是 LLM API 的要求：tool result 的顺序必须与 tool_calls 一致
-   *
-   * 注意：onBeforeToolCall hooks 在所有工具执行前统一触发，
-   * onAfterToolCall hooks 在收集到所有结果后按顺序触发。
-   * 这保证了 hook 的语义正确性：before 在 execute 之前，after 在 execute 之后。
    */
   private async executeToolCallsParallel(
     toolCalls: NonNullable<import('../core/message.js').ToolCall[]>,
-    messages: Message[]
+    messages: Message[],
+    streaming?: boolean,
+    onEvent?: (event: AgentStreamEvent) => void
   ): Promise<void> {
     const calls = toolCalls.map((tc) => ({
       id: tc.id,
@@ -277,7 +342,6 @@ export class DefaultAgent implements Agent {
       args: tc.args,
     }));
 
-    // onBeforeToolCall: 所有工具执行前统一触发
     if (this.hooks?.onBeforeToolCall) {
       for (const tc of toolCalls) {
         await this.hooks.onBeforeToolCall(tc.name, tc.args);
@@ -290,8 +354,6 @@ export class DefaultAgent implements Agent {
       this.config.parallelExecution
     );
 
-    // 按原始 tool_calls 顺序排列结果
-    // 保持消息顺序一致，是 LLM 能正确理解 tool result 的关键
     for (const tc of toolCalls) {
       const toolResult = result.results.get(tc.id);
       const failure = result.failures.find((f) => f.id === tc.id);
@@ -306,13 +368,24 @@ export class DefaultAgent implements Agent {
         resultContent = `Error: ${failure.error}`;
         isError = true;
       } else {
-        // 兜底：不应该发生
         resultContent = 'Error: Unknown execution failure';
         isError = true;
       }
 
       if (this.hooks?.onAfterToolCall) {
         await this.hooks.onAfterToolCall(tc.name, resultContent);
+      }
+
+      // 推送 toolResult 事件
+      if (streaming && onEvent) {
+        onEvent({
+          toolResult: {
+            toolCallId: tc.id,
+            toolName: tc.name,
+            content: resultContent,
+            isError,
+          },
+        });
       }
 
       messages.push({

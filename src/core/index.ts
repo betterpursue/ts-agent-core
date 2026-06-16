@@ -57,6 +57,7 @@ export type {
   AgentConfig,
   AgentHooks,
   AgentResult,
+  AgentStreamEvent,
   Agent,
   ParallelExecutionOptions,
 } from './agent.js';

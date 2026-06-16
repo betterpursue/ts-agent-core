@@ -36,12 +36,23 @@ function createMockProvider(responses: LLMResponse[]): LLMProvider {
     },
     async completeStream(
       _request: LLMRequest,
-      _onChunk: (chunk: any) => void
+      onChunk: (chunk: any) => void
     ): Promise<LLMResponse> {
       if (index >= responses.length) {
         return { content: 'No more responses configured', finishReason: 'stop' };
       }
-      return responses[index++];
+      const response = responses[index++];
+
+      // 模拟流式输出：将 content 按句子切分，逐个推送 chunk
+      if (response.content) {
+        // 中文场景：按字符或短句切分
+        const sentences = response.content.match(/.{1,10}/g) ?? [response.content];
+        for (const sentence of sentences) {
+          onChunk({ contentDelta: sentence });
+        }
+      }
+
+      return response;
     },
   };
 }
@@ -410,6 +421,179 @@ describe('DefaultAgent', () => {
 
       agent.reset();
       expect(memory.getMessages().length).toBe(0);
+    });
+  });
+
+  describe('stream()', () => {
+    it('直接回答时应该推送 contentDelta 事件和 done 事件', async () => {
+      const provider = createMockProvider([
+        { content: 'Hello! How can I help you?', finishReason: 'stop' },
+      ]);
+      const agent = createTestAgent({ provider });
+
+      const events: any[] = [];
+      const result = await agent.stream('Hi', (e) => events.push(e));
+
+      expect(result.output).toBe('Hello! How can I help you?');
+      expect(result.iterations).toBe(1);
+
+      const contentEvents = events.filter((e) => e.contentDelta !== undefined);
+      expect(contentEvents.length).toBeGreaterThan(0);
+      const fullContent = contentEvents.map((e) => e.contentDelta).join('');
+      expect(fullContent).toBe('Hello! How can I help you?');
+
+      const doneEvents = events.filter((e) => e.done !== undefined);
+      expect(doneEvents.length).toBe(1);
+      expect(doneEvents[0].done.output).toBe('Hello! How can I help you?');
+    });
+
+    it('工具调用时应该推送 toolCall 和 toolResult 事件', async () => {
+      const provider = createMockProvider([
+        {
+          content: '',
+          finishReason: 'tool_calls',
+          toolCalls: [
+            { id: 'call_s1', name: 'calculator', args: { expression: '2+2' } },
+          ],
+        },
+        { content: 'The answer is 4.', finishReason: 'stop' },
+      ]);
+      const agent = createTestAgent({ provider, tools: [calculatorTool] });
+
+      const events: any[] = [];
+      const result = await agent.stream('What is 2+2?', (e) => events.push(e));
+
+      expect(result.output).toBe('The answer is 4.');
+
+      const toolCallEvents = events.filter((e) => e.toolCall !== undefined);
+      expect(toolCallEvents.length).toBe(1);
+      expect(toolCallEvents[0].toolCall.name).toBe('calculator');
+      expect(toolCallEvents[0].toolCall.args).toEqual({ expression: '2+2' });
+
+      const toolResultEvents = events.filter((e) => e.toolResult !== undefined);
+      expect(toolResultEvents.length).toBe(1);
+      expect(toolResultEvents[0].toolResult.toolCallId).toBe('call_s1');
+      expect(toolResultEvents[0].toolResult.content).toBe('4');
+
+      const iterEvents = events.filter((e) => e.iteration !== undefined);
+      expect(iterEvents.length).toBe(2);
+
+      const doneEvents = events.filter((e) => e.done !== undefined);
+      expect(doneEvents.length).toBe(1);
+    });
+
+    it('工具不存在时应该推送错误 toolResult', async () => {
+      const provider = createMockProvider([
+        {
+          content: '',
+          finishReason: 'tool_calls',
+          toolCalls: [{ id: 'call_bad', name: 'nonexistent', args: {} }],
+        },
+        { content: 'Tool not found.', finishReason: 'stop' },
+      ]);
+      const agent = createTestAgent({ provider });
+
+      const events: any[] = [];
+      const result = await agent.stream('Call nonexistent tool', (e) => events.push(e));
+
+      const toolResultEvents = events.filter((e) => e.toolResult !== undefined);
+      expect(toolResultEvents.length).toBe(1);
+      expect(toolResultEvents[0].toolResult.isError).toBe(true);
+      expect(toolResultEvents[0].toolResult.content).toContain('not found');
+      expect(result.output).toBe('Tool not found.');
+    });
+
+    it('多次迭代时事件应该按自然顺序排列', async () => {
+      const provider = createMockProvider([
+        {
+          content: '',
+          finishReason: 'tool_calls',
+          toolCalls: [
+            { id: 'call_m1', name: 'calculator', args: { expression: '3*4' } },
+          ],
+        },
+        {
+          content: 'First result is 12.',
+          finishReason: 'tool_calls',
+          toolCalls: [
+            { id: 'call_m2', name: 'calculator', args: { expression: '12+5' } },
+          ],
+        },
+        { content: 'Final result is 17.', finishReason: 'stop' },
+      ]);
+      const agent = createTestAgent({ provider, tools: [calculatorTool] });
+
+      const events: any[] = [];
+      await agent.stream('Calculate 3*4 and add 5', (e) => events.push(e));
+
+      const typeSeq = events.map((e) => {
+        if (e.contentDelta) return 'delta';
+        if (e.toolCall) return 'toolCall';
+        if (e.toolResult) return 'toolResult';
+        if (e.iteration) return 'iteration';
+        if (e.done) return 'done';
+        return 'unknown';
+      });
+
+      expect(typeSeq[0]).toBe('toolCall');
+      expect(typeSeq[1]).toBe('toolResult');
+      expect(typeSeq[typeSeq.length - 1]).toBe('done');
+    });
+
+    it('maxIterations 限制在流式模式下同样生效', async () => {
+      const toolCallResponse: LLMResponse = {
+        content: '',
+        finishReason: 'tool_calls',
+        toolCalls: [
+          { id: 'call_loop', name: 'calculator', args: { expression: '1+1' } },
+        ],
+      };
+      const responses = Array(15).fill(toolCallResponse);
+      const provider = createMockProvider(responses);
+      const agent = createTestAgent({
+        provider,
+        tools: [calculatorTool],
+        maxIterations: 3,
+      });
+
+      const events: any[] = [];
+      const result = await agent.stream('Keep calculating', (e) => events.push(e));
+
+      expect(result.stoppedEarly).toBe(true);
+      expect(result.iterations).toBe(3);
+
+      const doneEvent = events.find((e) => e.done);
+      expect(doneEvent).toBeDefined();
+      expect(doneEvent!.done.stoppedEarly).toBe(true);
+    });
+
+    it('stream() 返回的 AgentResult 字段齐全', async () => {
+      const provider = createMockProvider([
+        {
+          content: '',
+          finishReason: 'tool_calls',
+          toolCalls: [
+            { id: 'call_1', name: 'calculator', args: { expression: '10/2' } },
+          ],
+        },
+        { content: 'The answer is 5.', finishReason: 'stop' },
+      ]);
+      const agent = createTestAgent({ provider, tools: [calculatorTool] });
+
+      const events: any[] = [];
+      const result = await agent.stream('What is 10 divided by 2?', (e) => events.push(e));
+
+      expect(result).toHaveProperty('messages');
+      expect(result).toHaveProperty('output');
+      expect(result).toHaveProperty('iterations');
+      expect(result).toHaveProperty('totalTokens');
+      expect(result).toHaveProperty('stoppedEarly');
+      expect(result.output).toBe('The answer is 5.');
+      expect(result.iterations).toBe(2);
+
+      const doneEvent = events.find((e) => e.done);
+      expect(doneEvent!.done.output).toBe(result.output);
+      expect(doneEvent!.done.iterations).toBe(result.iterations);
     });
   });
 });
