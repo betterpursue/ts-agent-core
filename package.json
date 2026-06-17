@@ -7,7 +7,29 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": "./dist/index.js",
-    "./*": "./dist/*.js"
+    "./tools": "./dist/tools/index.js",
+    "./runloop": "./dist/runloop/index.js",
+    "./provider": "./dist/provider/index.js",
+    "./memory": "./dist/memory/index.js",
+    "./core": "./dist/core/index.js"
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "llm",
+    "typescript",
+    "tool-calling",
+    "ai",
+    "function-calling"
+  ],
+  "engines": {
+    "node": ">=18"
   },
   "scripts": {
     "build": "tsc",
