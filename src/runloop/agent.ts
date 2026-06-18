@@ -14,6 +14,7 @@ import type { Agent, AgentConfig, AgentResult, AgentHooks, AgentStreamEvent } fr
 import type { Message } from '../core/message.js';
 import { systemMessage, userMessage, assistantMessage } from '../core/message.js';
 import type { SessionCheckpoint } from '../core/session.js';
+import type { MemoryInjector } from '../core/memory.js';
 import { executeToolsParallel } from '../tools/parallel-executor.js';
 
 export class DefaultAgent implements Agent {
@@ -22,6 +23,8 @@ export class DefaultAgent implements Agent {
 
   /** 每个 session 的上次 checkpoint 消息数（用于 interval 策略） */
   private lastCheckpointCounts: Map<string, number> = new Map();
+  /** 是否已经在当前会话中注入过记忆（用于 before_first_call 策略） */
+  private injectedThisSession = false;
 
   constructor(config: AgentConfig) {
     this.config = config;
@@ -40,6 +43,7 @@ export class DefaultAgent implements Agent {
 
   reset(): void {
     this.config.memory.shortTerm.clear();
+    this.injectedThisSession = false;
   }
 
   /**
@@ -100,9 +104,12 @@ export class DefaultAgent implements Agent {
 
       const toolMetadatas = this.config.tools.listMetadata();
 
-      // Hook: LLM 调用前
+      // 【记忆注入】在 LLM 调用前，将长期记忆注入上下文
+      const llmMessages = await this.prepareMessagesWithMemory(messages);
+
+      // Hook: LLM 调用前（注入后的消息列表）
       if (this.hooks?.onBeforeLLMCall) {
-        await this.hooks.onBeforeLLMCall(messages);
+        await this.hooks.onBeforeLLMCall(llmMessages);
       }
 
       let response;
@@ -111,7 +118,7 @@ export class DefaultAgent implements Agent {
         // 流式模式：逐块推送 LLM 输出
         response = await this.config.model.provider.completeStream(
           {
-            messages,
+            messages: llmMessages,
             model: this.config.model.model,
             tools: toolMetadatas.length > 0 ? toolMetadatas : undefined,
             maxTokens: this.config.model.maxTokens,
@@ -126,7 +133,7 @@ export class DefaultAgent implements Agent {
       } else {
         // 非流式模式
         response = await this.config.model.provider.complete({
-          messages,
+          messages: llmMessages,
           model: this.config.model.model,
           tools: toolMetadatas.length > 0 ? toolMetadatas : undefined,
           maxTokens: this.config.model.maxTokens,
@@ -233,6 +240,52 @@ export class DefaultAgent implements Agent {
     if (streaming && onEvent) {
       onEvent({ done: result });
     }
+
+    return result;
+  }
+
+  /**
+   * 准备带有长期记忆注入的消息列表
+   *
+   * 如果配置了记忆注入，在系统提示之后插入一段记忆上下文消息。
+   * 不对原始 messages 做修改，每次都返回新数组。
+   */
+  private async prepareMessagesWithMemory(
+    messages: Message[]
+  ): Promise<Message[]> {
+    const injection = this.config.memoryInjection;
+    if (!injection) {
+      return messages; // 未配置注入，直接返回原始列表
+    }
+
+    const timing = injection.config?.timing ?? 'before_every_call';
+    if (timing === 'before_first_call' && this.injectedThisSession) {
+      return messages; // 已经注入过一次，跳过
+    }
+
+    const context = await injection.injector.buildContext(
+      messages,
+      this.config.memory.longTerm,
+      injection.config
+    );
+
+    if (!context) {
+      return messages; // 没有相关记忆
+    }
+
+    this.injectedThisSession = true;
+
+    // 找到系统提示之后的位置插入记忆上下文
+    // 如果有多条 system 消息，插在最后一条 system 之后
+    const lastSystemIdx = messages.reduce((last, m, i) =>
+      m.role === 'system' ? i : last, -1
+    );
+
+    const result = [...messages];
+    result.splice(lastSystemIdx + 1, 0, {
+      role: 'system',
+      content: context,
+    });
 
     return result;
   }

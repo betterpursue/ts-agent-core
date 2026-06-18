@@ -42,6 +42,9 @@ export type {
   LongTermMemoryQuery,
   LongTermMemory,
   MemorySystem,
+  MemoryInjector,
+  MemoryInjectionConfig,
+  InjectionTiming,
 } from './memory.js';
 export { SlidingWindowMemory } from './memory.js';
 

@@ -56,6 +56,45 @@ export interface LongTermMemory {
   forget(threshold: number): Promise<number>;
 }
 
+/** 记忆注入时机 */
+export type InjectionTiming = 'before_first_call' | 'before_every_call';
+
+/** 记忆注入配置 */
+export interface MemoryInjectionConfig {
+  /** 每次注入的最大记忆条数（默认 5） */
+  maxMemories?: number;
+  /** 最小相关度阈值（默认 0.15） */
+  minRelevance?: number;
+  /** 注入时机（默认 before_every_call） */
+  timing?: InjectionTiming;
+  /** 构建检索 query 时使用的最近消息窗口大小（默认 3） */
+  queryWindowSize?: number;
+}
+
+/**
+ * 记忆注入器 —— 将长期记忆注入到 LLM 上下文中
+ *
+ * 职责：
+ * 1. 根据当前对话构造检索 query
+ * 2. 从长期记忆中检索相关条目
+ * 3. 格式化为 LLM 可读的上下文文本
+ */
+export interface MemoryInjector {
+  /**
+   * 构建记忆上下文文本
+   *
+   * @param messages 当前完整对话消息列表
+   * @param longTerm 长期记忆存储
+   * @param config 注入配置
+   * @returns 格式化的记忆上下文文本，空字符串表示没有相关记忆
+   */
+  buildContext(
+    messages: import('./message.js').Message[],
+    longTerm: LongTermMemory,
+    config?: MemoryInjectionConfig
+  ): Promise<string>;
+}
+
 /** 完整的 Agent 记忆系统 */
 export interface MemorySystem {
   shortTerm: ShortTermMemory;

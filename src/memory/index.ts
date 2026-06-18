@@ -9,3 +9,5 @@ export type { ConsolidationConfig, ExtractedFact, ConsolidationStrategy } from '
 export { SimpleConsolidationStrategy } from './consolidation.js';
 export type { DefaultMemorySystemConfig } from './default-memory-system.js';
 export { DefaultMemorySystem } from './default-memory-system.js';
+export type { MemoryInjector } from '../core/memory.js';
+export { DefaultMemoryInjector, NoopMemoryInjector } from './memory-injector.js';

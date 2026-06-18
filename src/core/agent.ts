@@ -9,7 +9,7 @@
 
 import type { Message } from './message.js';
 import type { ToolRegistry } from './tool.js';
-import type { MemorySystem } from './memory.js';
+import type { MemorySystem, MemoryInjector, MemoryInjectionConfig } from './memory.js';
 import type { ModelConfig } from './llm.js';
 import type { PersistentSession, CheckpointManager, CheckpointTrigger } from './session.js';
 
@@ -36,6 +36,14 @@ export interface AgentConfig {
   maxIterations?: number;
   /** 并行执行配置。设置后启用并行工具执行，替代默认的串行执行 */
   parallelExecution?: ParallelExecutionOptions;
+  /**
+   * 记忆注入配置（可选，不配置则不注入长期记忆）
+   */
+  memoryInjection?: {
+    injector: MemoryInjector;
+    config?: MemoryInjectionConfig;
+  };
+
   /**
    * 会话配置（可选，不配置则无持久化）
    */
