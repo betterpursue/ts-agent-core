@@ -162,7 +162,10 @@ export class DefaultMemoryInjector implements MemoryInjector {
     const hours = Math.floor(minutes / 60);
     const days = Math.floor(hours / 24);
 
-    if (days > 0) {
+    if (days === 1) {
+      return '昨天';
+    }
+    if (days > 1) {
       const date = new Date(ts);
       return `${date.getMonth() + 1}/${date.getDate()}`;
     }
