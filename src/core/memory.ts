@@ -59,6 +59,20 @@ export interface LongTermMemory {
 /** 记忆注入时机 */
 export type InjectionTiming = 'before_first_call' | 'before_every_call';
 
+/** 检索结果重排配置 */
+export interface RerankerConfig {
+  /** 是否启用重排 */
+  enabled: boolean;
+  /** 时效衰减权重（0-1），0=不使用，1=完全使用时效替代相关度 */
+  recencyWeight?: number;
+  /** MMR 多样性/相关度平衡参数 λ（0-1），0=纯多样性，1=纯相关度 */
+  mmrLambda?: number;
+  /** 时效衰减半衰期（毫秒），默认 7 天 */
+  recencyHalfLife?: number;
+  /** MMR 候选窗口大小 */
+  mmrCandidateWindow?: number;
+}
+
 /** 记忆注入配置 */
 export interface MemoryInjectionConfig {
   /** 每次注入的最大记忆条数（默认 5） */
@@ -69,6 +83,8 @@ export interface MemoryInjectionConfig {
   timing?: InjectionTiming;
   /** 构建检索 query 时使用的最近消息窗口大小（默认 3） */
   queryWindowSize?: number;
+  /** 检索后重排配置（可选），启用时效加权和 MMR 多样性重排 */
+  reranker?: RerankerConfig;
 }
 
 /**

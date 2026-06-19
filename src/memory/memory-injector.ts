@@ -19,14 +19,24 @@ import type {
   LongTermMemory,
   MemoryInjector,
   MemoryInjectionConfig,
+  LongTermMemoryItem,
 } from '../core/memory.js';
+import type { Reranker } from './reranker.js';
+import { DefaultReranker, NoopReranker, RERANKER_DEFAULTS } from './reranker.js';
 
 /** 默认配置 */
-const DEFAULT_CONFIG: Required<MemoryInjectionConfig> = {
+const DEFAULT_CONFIG: Required<MemoryInjectionConfig & { queryWindowSize: number }> = {
   maxMemories: 5,
   minRelevance: 0.15,
   timing: 'before_every_call',
   queryWindowSize: 3,
+  reranker: {
+    enabled: false,
+    recencyWeight: 0.1,
+    mmrLambda: 0.7,
+    recencyHalfLife: 7 * 24 * 60 * 60 * 1000,
+    mmrCandidateWindow: 20,
+  },
 };
 
 /**
@@ -43,6 +53,17 @@ const DEFAULT_CONFIG: Required<MemoryInjectionConfig> = {
  * ```
  */
 export class DefaultMemoryInjector implements MemoryInjector {
+  /** 检索结果重排器（可选） */
+  private reranker: Reranker;
+
+  /**
+   * @param reranker - 可选的检索结果重排器。不传则使用 NoopReranker（不重排）。
+   *                   大多数情况下，通过 MemoryInjectionConfig.reranker 配置即可。
+   */
+  constructor(reranker?: Reranker) {
+    this.reranker = reranker ?? new NoopReranker();
+  }
+
   async buildContext(
     messages: Message[],
     longTerm: LongTermMemory,
@@ -55,14 +76,41 @@ export class DefaultMemoryInjector implements MemoryInjector {
       return ''; // 没有足够的对话来构建 query
     }
 
-    const results = await longTerm.search({
+    // 【检索阶段】
+    // 如果启用了重排（reranker），需要搜索更多结果来填充 MMR 候选窗口
+    const needMoreResults = cfg.reranker?.enabled;
+    const searchMaxResults = needMoreResults
+      ? Math.max(
+          cfg.maxMemories,
+          cfg.reranker?.mmrCandidateWindow ?? RERANKER_DEFAULTS.mmrCandidateWindow
+        )
+      : cfg.maxMemories;
+
+    let results: LongTermMemoryItem[] = await longTerm.search({
       query: queryText,
-      maxResults: cfg.maxMemories,
+      maxResults: searchMaxResults,
       minRelevance: cfg.minRelevance,
     });
 
     if (results.length === 0) {
       return '';
+    }
+
+    // 【重排阶段】如果配置了重排（reranker.enabled === true），对结果做后处理
+    if (cfg.reranker?.enabled) {
+      // 如果未传入自定义 reranker，按需创建默认重排器
+      const activeReranker =
+        this.reranker instanceof NoopReranker && cfg.reranker.enabled
+          ? new DefaultReranker()
+          : this.reranker;
+
+      results = await activeReranker.rerank(queryText, results, {
+        recencyWeight: cfg.reranker.recencyWeight,
+        mmrLambda: cfg.reranker.mmrLambda,
+        recencyHalfLife: cfg.reranker.recencyHalfLife,
+        mmrCandidateWindow: cfg.reranker.mmrCandidateWindow,
+        maxResults: cfg.maxMemories,
+      });
     }
 
     return this.formatMemoryContext(results);
@@ -81,6 +129,9 @@ export class DefaultMemoryInjector implements MemoryInjector {
    * - 对话越长，全部拼接的 token 开销越大
    * - 最近的对话通常反映当前话题
    * - 3 条是一个经验值，足够捕获话题信号又不过度
+   *
+   * 好的 query 对 reranker 也很重要——如果 query 太差，
+   * 时效加权和 MMR 都无法弥补。
    */
   private buildQuery(
     messages: Message[],
