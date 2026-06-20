@@ -111,6 +111,20 @@ export interface MemoryInjector {
   ): Promise<string>;
 }
 
+/**
+ * Embedding Provider —— 将文本转换为向量
+ *
+ * 接口设计为可替换的 Provider 模式，支持不同的 embedding 服务。
+ * embed() 和 embedMany() 分开是为了方便单条检索的调用方。
+ */
+export interface EmbeddingProvider {
+  readonly name: string;
+  /** 将单段文本转为向量 */
+  embed(text: string): Promise<number[]>;
+  /** 批量将多段文本转为向量 */
+  embedMany(texts: string[]): Promise<number[][]>;
+}
+
 /** 完整的 Agent 记忆系统 */
 export interface MemorySystem {
   shortTerm: ShortTermMemory;
