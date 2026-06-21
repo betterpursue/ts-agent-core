@@ -199,7 +199,7 @@ describe('InMemoryLongTermMemory', () => {
 // ─── SimpleConsolidationStrategy ─────────────────────────────────
 
 describe('SimpleConsolidationStrategy', () => {
-  it('extracts facts from user messages', () => {
+  it('extracts facts from user messages', async () => {
     const strategy = new SimpleConsolidationStrategy();
     const messages = [
       userMessage('我喜欢吃辣的川菜，非常喜欢'),
@@ -207,7 +207,7 @@ describe('SimpleConsolidationStrategy', () => {
       userMessage('我平时用 Python 写代码'),
     ];
 
-    const facts = strategy.extract(messages);
+    const facts = await strategy.extract(messages);
 
     // 两条超过 10 个字符的用户消息都应该被提取
     expect(facts.length).toBe(2);
@@ -219,7 +219,7 @@ describe('SimpleConsolidationStrategy', () => {
     expect(prefFacts.some((f) => f.content.includes('喜欢'))).toBe(true);
   });
 
-  it('skips short messages (greetings)', () => {
+  it('skips short messages (greetings)', async () => {
     const strategy = new SimpleConsolidationStrategy();
     const messages = [
       userMessage('Hi'),
@@ -227,13 +227,13 @@ describe('SimpleConsolidationStrategy', () => {
       userMessage('我今年大三，学软件工程的'),
     ];
 
-    const facts = strategy.extract(messages);
+    const facts = await strategy.extract(messages);
     // 只有第三条被提取（前两条太短）
     expect(facts.length).toBe(1);
     expect(facts[0].content).toContain('大三');
   });
 
-  it("assigns higher importance to repeated topics", () => {
+  it("assigns higher importance to repeated topics", async () => {
     const strategy = new SimpleConsolidationStrategy();
     const messages1 = [
       userMessage('我平时使用 TypeScript 写前端'),
@@ -245,15 +245,15 @@ describe('SimpleConsolidationStrategy', () => {
       userMessage('我非常喜欢 TypeScript 的类型推断'),
     ];
 
-    const facts1 = strategy.extract(messages1);
-    const facts2 = strategy.extract(messages2);
-    const facts3 = strategy.extract(messages3);
+    const facts1 = await strategy.extract(messages1);
+    const facts2 = await strategy.extract(messages2);
+    const facts3 = await strategy.extract(messages3);
 
     // TypeScript 被提到了 3 次，最后一次的重要性应该比第一次高
     expect(facts3[0].importance).toBeGreaterThan(facts1[0].importance);
   });
 
-  it('respects maxFactsPerConsolidation', () => {
+  it('respects maxFactsPerConsolidation', async () => {
     const strategy = new SimpleConsolidationStrategy({
       maxFactsPerConsolidation: 1,
     });
@@ -264,17 +264,17 @@ describe('SimpleConsolidationStrategy', () => {
       userMessage('路上看到一只可爱的流浪猫'),
     ];
 
-    const facts = strategy.extract(messages);
+    const facts = await strategy.extract(messages);
     expect(facts.length).toBeLessThanOrEqual(1);
   });
 
-  it('classifies preference messages correctly', () => {
+  it('classifies preference messages correctly', async () => {
     const strategy = new SimpleConsolidationStrategy();
     const messages = [
       userMessage('我平时习惯用 Vim 编辑器写代码'),
     ];
 
-    const facts = strategy.extract(messages);
+    const facts = await strategy.extract(messages);
     expect(facts.length).toBe(1);
     expect(facts[0].type).toBe('preference');
   });

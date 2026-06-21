@@ -39,10 +39,20 @@ export interface ExtractedFact {
 
 /**
  * 合并策略 —— 从消息列表中提取可存储到长期记忆的事实
+ *
+ * v4 新增：
+ * - extract() 改为异步，支持 LLM 驱动的提取
+ * - merge() 用于将新事实与已有长期记忆合并（去重、矛盾检测、摘要合并）
  */
 export interface ConsolidationStrategy {
   /** 从一组消息中提取事实 */
-  extract(messages: Message[]): ExtractedFact[];
+  extract(messages: Message[]): Promise<ExtractedFact[]>;
+
+  /** 将新提取的事实与已有长期记忆合并，返回最终要存储的事实列表 */
+  merge(
+    newFacts: ExtractedFact[],
+    existingMemories: LongTermMemoryItem[],
+  ): Promise<ExtractedFact[]>;
 }
 
 /**
@@ -62,7 +72,7 @@ export class SimpleConsolidationStrategy implements ConsolidationStrategy {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  extract(messages: Message[]): ExtractedFact[] {
+  async extract(messages: Message[]): Promise<ExtractedFact[]> {
     const facts: ExtractedFact[] = [];
 
     // 从 user 消息提取
@@ -80,6 +90,18 @@ export class SimpleConsolidationStrategy implements ConsolidationStrategy {
     scored.sort((a, b) => b.importance - a.importance);
 
     return scored.slice(0, this.config.maxFactsPerConsolidation);
+  }
+
+  /**
+   * 合并新事实与已有长期记忆 —— 默认实现不做任何合并
+   *
+   * LLMConsolidationStrategy 会覆盖此方法，用 LLM 分析事实之间的关系。
+   */
+  async merge(
+    newFacts: ExtractedFact[],
+    _existingMemories: LongTermMemoryItem[],
+  ): Promise<ExtractedFact[]> {
+    return newFacts;
   }
 
   /**

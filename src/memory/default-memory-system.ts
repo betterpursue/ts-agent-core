@@ -88,20 +88,39 @@ export class DefaultMemorySystem implements MemorySystem {
   /**
    * 合并：将短期记忆中的关键信息提炼到长期记忆
    *
+   * v4 更新：
+   * - extract() 现在是异步调用
+   * - 新增 merge 步骤：将新事实与已有长期记忆合并（由 ConsolidationStrategy 实现）
+   * - 对于不支持合并的策略（如 SimpleConsolidationStrategy），merge 直接返回原始事实
+   *
    * 执行流程：
    * 1. 从短期记忆获取所有消息
    * 2. 运行合并策略提取事实
-   * 3. 将提取的事实存入长期记忆
-   * 4. 如果短期记忆超过阈值，可选清理旧消息
+   * 3. 将提取的事实与已有长期记忆合并（去重、摘要合并、矛盾检测）
+   * 4. 将合并后的事实存入长期记忆
    */
   async consolidate(): Promise<void> {
     const messages = this.shortTerm.getMessages();
 
     if (messages.length === 0) return;
 
-    const facts = this.consolidationStrategy.extract(messages);
+    // Phase 1: 提取事实
+    const facts = await this.consolidationStrategy.extract(messages);
 
-    for (const fact of facts) {
+    if (facts.length === 0) return;
+
+    // Phase 2: 合并（去重、矛盾检测、摘要合并）
+    const existingMemories = await this.longTerm.search({
+      query: '',
+      maxResults: 100,
+    });
+    const mergedFacts = await this.consolidationStrategy.merge(
+      facts,
+      existingMemories,
+    );
+
+    // Phase 3: 存入长期记忆
+    for (const fact of mergedFacts) {
       await this.longTerm.store({
         content: fact.content,
         metadata: {
