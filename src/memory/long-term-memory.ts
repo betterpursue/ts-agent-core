@@ -325,6 +325,13 @@ export class InMemoryLongTermMemory implements LongTermMemory {
   }
 
   /**
+   * 获取所有条目（用于遗忘策略等内部流程）
+   */
+  getAllItems(): LongTermMemoryItem[] {
+    return Array.from(this.items.values());
+  }
+
+  /**
    * 生成唯一 ID
    */
   private generateId(): string {

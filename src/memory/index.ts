@@ -11,6 +11,12 @@
  * - LLMConsolidationStrategy / LLMConsolidationConfig
  * - LLMProvider 接口 / OpenAIProvider / MockLLMProvider
  * - ConsolidationStrategy 接口增加 merge() 方法
+ *
+ * 第五篇：遗忘机制的工程化新增：
+ * - ForgettingStrategy 接口
+ * - ImportanceForgetting / AgeBasedForgetting / CapacityForgetting
+ * - CompositeForgetting 复合策略
+ * - ForgetExecutor 遗忘执行器
  */
 
 export { InMemoryLongTermMemory } from './long-term-memory.js';
@@ -35,3 +41,19 @@ export {
 export type { OpenAIEmbeddingProviderConfig } from './embedding-provider.js';
 export { VectorIndex } from './vector-index.js';
 export type { VectorEntry, VectorSearchResult } from './vector-index.js';
+
+// 遗忘机制
+export type {
+  ForgettingScore,
+  ForgettingStrategy,
+  ForgettingContext,
+  ForgetExecutorConfig,
+  ForgetResult,
+} from './forgetting.js';
+export {
+  ImportanceForgetting,
+  AgeBasedForgetting,
+  CapacityForgetting,
+  CompositeForgetting,
+  ForgetExecutor,
+} from './forgetting.js';

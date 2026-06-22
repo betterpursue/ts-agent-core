@@ -54,6 +54,8 @@ export interface LongTermMemory {
   delete(id: string): Promise<boolean>;
   /** 清理低重要性记忆（遗忘机制入口） */
   forget(threshold: number): Promise<number>;
+  /** 获取所有条目（用于遗忘策略等内部流程） */
+  getAllItems(): LongTermMemoryItem[];
 }
 
 /** 记忆注入时机 */

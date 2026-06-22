@@ -138,6 +138,51 @@ export class DefaultMemorySystem implements MemorySystem {
   }
 
   /**
+   * 遗忘 —— 根据策略清理长期记忆
+   *
+   * 使用复合遗忘策略：
+   * - 重要性维度：删除 importance < 0.3 的
+   * - 时效维度：超过 7 天半衰期，超过 90 天必忘
+   * - 容量维度：超过 500 条时启用
+   *
+   * 可传入自定义策略覆盖默认行为。
+   *
+   * @param strategy 可选的自定义遗忘策略。不传则使用默认复合策略。
+   * @returns 删除的条目数量
+   */
+  async forget(
+    strategy?: import('./forgetting.js').ForgettingStrategy,
+  ): Promise<number> {
+    const { ForgetExecutor, CompositeForgetting, ImportanceForgetting, AgeBasedForgetting, CapacityForgetting } = await import('./forgetting.js');
+
+    const defaultStrategy = new CompositeForgetting([
+      { strategy: new ImportanceForgetting(0.3), weight: 0.5 },
+      {
+        strategy: new AgeBasedForgetting(
+          7 * 24 * 60 * 60 * 1000, // 7 天半衰期
+          90 * 24 * 60 * 60 * 1000, // 90 天最大年龄
+        ),
+        weight: 0.3,
+      },
+      {
+        strategy: new CapacityForgetting(500),
+        weight: 0.2,
+      },
+    ]);
+
+    const executor = new ForgetExecutor({
+      strategy: strategy ?? defaultStrategy,
+      scoreThreshold: 0.6,
+      maxDeletionsPerRun: 50,
+    });
+
+    const result = await executor.execute(
+      this.longTerm as any,
+    );
+    return result.deletedCount;
+  }
+
+  /**
    * 添加消息并触发自动合并（如果配置了 autoConsolidateInterval）
    */
   addAndMaybeConsolidate(msg: Message): void {
