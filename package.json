@@ -11,6 +11,7 @@
     "./runloop": "./dist/runloop/index.js",
     "./provider": "./dist/provider/index.js",
     "./memory": "./dist/memory/index.js",
+    "./skill": "./dist/skill/index.js",
     "./core": "./dist/core/index.js"
   },
   "sideEffects": false,

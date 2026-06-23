@@ -1,0 +1,9 @@
+﻿
+ RUN  v4.1.8 D:/A new start/projects/ts-agent-core
+
+
+ Test Files  12 passed (12)
+      Tests  208 passed (208)
+   Start at  16:02:53
+   Duration  1.75s (transform 1.06s, setup 0ms, import 2.57s, tests 1.73s, environment 2ms)
+
