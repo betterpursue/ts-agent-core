@@ -16,3 +16,13 @@ export {
   DefaultSkillRegistry,
   ProgressiveSkillLoader,
 } from './skill.js';
+
+export type {
+  ToSkillOptions,
+} from './tool-adapter.js';
+
+export {
+  toSkill,
+  groupToolsByPrefix,
+  ToolRegistryAdapter,
+} from './tool-adapter.js';

@@ -63,6 +63,7 @@ export type {
   AgentStreamEvent,
   Agent,
   ParallelExecutionOptions,
+  SkillLoader,
 } from './agent.js';
 
 export type {

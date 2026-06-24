@@ -10,11 +10,12 @@
  * - stream() 和 run() 共享同一套消息管理逻辑，区别仅在 LLM 调用方式
  */
 
-import type { Agent, AgentConfig, AgentResult, AgentHooks, AgentStreamEvent } from '../core/agent.js';
+import type { Agent, AgentConfig, AgentResult, AgentHooks, AgentStreamEvent, SkillLoader } from '../core/agent.js';
 import type { Message } from '../core/message.js';
 import { systemMessage, userMessage, assistantMessage } from '../core/message.js';
 import type { SessionCheckpoint } from '../core/session.js';
 import type { MemoryInjector } from '../core/memory.js';
+import type { Tool, ToolMetadata } from '../core/tool.js';
 import { executeToolsParallel } from '../tools/parallel-executor.js';
 
 export class DefaultAgent implements Agent {
@@ -99,10 +100,27 @@ export class DefaultAgent implements Agent {
     let stoppedEarly = false;
     let lastResponse = '';
 
+    /** 当前轮次的技能工具映射（由 skillLoader 动态维护） */
+    let skillToolMap = new Map<string, Tool>();
+
     while (iterations < maxIterations) {
       iterations++;
 
-      const toolMetadatas = this.config.tools.listMetadata();
+      // 【Skill 发现与激活】在 LLM 调用前，根据最新消息选择技能并激活
+      const latestQuery = this.getLatestUserQuery(messages);
+      if (this.config.skillLoader && latestQuery) {
+        await this.config.skillLoader.selectAndActivate(latestQuery);
+
+        // 构建当前可用的技能工具映射
+        const skillTools = this.config.skillLoader.getActiveTools();
+        skillToolMap = new Map(skillTools.map((t) => [t.metadata.name, t]));
+      }
+
+      // 合并工具元数据：技能激活的工具 + 全局注册的工具
+      const toolMetadatas = this.buildToolMetadatas(
+        this.config.skillLoader,
+        skillToolMap
+      );
 
       // 【记忆注入】在 LLM 调用前，将长期记忆注入上下文
       const llmMessages = await this.prepareMessagesWithMemory(messages);
@@ -319,18 +337,109 @@ export class DefaultAgent implements Agent {
   /**
    * 串行执行工具调用
    */
+  /**
+   * 构建合并后的工具元数据列表
+   *
+   * 当配置了 SkillLoader 时，返回激活 Skill 的工具元数据；
+   * 未配置时，返回 ToolRegistry 中全部工具的原数据（向后兼容）。
+   */
+  private buildToolMetadatas(
+    skillLoader: SkillLoader | undefined,
+    skillToolMap: Map<string, Tool>
+  ): ToolMetadata[] {
+    if (!skillLoader) {
+      // 未启用技能系统：返回全部工具（向后兼容）
+      return this.config.tools.listMetadata();
+    }
+
+    // 启用技能系统：Skill 工具 + 全局工具（不被 Skill 覆盖的）
+    const skillNames = new Set(skillToolMap.keys());
+    const globalMetadatas = this.config.tools
+      .listMetadata()
+      .filter((m) => !skillNames.has(m.name));
+
+    const skillMetadatas = Array.from(skillToolMap.values()).map(
+      (t) => t.metadata
+    );
+
+    return [...skillMetadatas, ...globalMetadatas];
+  }
+
+  /**
+   * 解析工具：Skill 优先，回退到全局注册
+   */
+  private resolveTool(
+    name: string,
+    skillToolMap: Map<string, Tool>
+  ): Tool | undefined {
+    return skillToolMap.get(name) ?? this.config.tools.get(name);
+  }
+
+  /**
+   * 获取消息列表中最后一条用户消息的文本（用于 skill 选择）
+   */
+  private getLatestUserQuery(messages: Message[]): string | undefined {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        return typeof messages[i].content === 'string'
+          ? messages[i].content
+          : undefined;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * 构建合并后的 ToolRegistry（用于并行执行）
+   *
+   * 将 Skill 激活的工具与全局工具注册表合并为一个统一视图。
+   * 这样并行执行器只需要调用 registry.get(name)，无需关心工具来源。
+   */
+  private buildMergedToolRegistry(
+    skillToolMap: Map<string, Tool>
+  ): import('../core/tool.js').ToolRegistry {
+    const globalTools = this.config.tools;
+
+    return {
+      register: (tool: Tool) => globalTools.register(tool),
+      registerMany: (tools: Tool[]) => globalTools.registerMany(tools),
+      get: (name: string) =>
+        skillToolMap.get(name) ?? globalTools.get(name),
+      listMetadata: () => {
+        const skillNames = new Set(skillToolMap.keys());
+        const globalMetadatas = globalTools
+          .listMetadata()
+          .filter((m) => !skillNames.has(m.name));
+        const skillMetadatas = Array.from(skillToolMap.values()).map(
+          (t) => t.metadata
+        );
+        return [...skillMetadatas, ...globalMetadatas];
+      },
+      unregister: (name: string) => globalTools.unregister(name),
+    };
+  }
+
   private async executeToolCallsSequential(
     toolCalls: NonNullable<import('../core/message.js').ToolCall[]>,
     messages: Message[],
     streaming?: boolean,
     onEvent?: (event: AgentStreamEvent) => void
   ): Promise<void> {
+    // 获取当前技能工具映射（传递给每个工具调用）
+    const skillToolMap = new Map<string, Tool>();
+    if (this.config.skillLoader) {
+      const skillTools = this.config.skillLoader.getActiveTools();
+      for (const t of skillTools) {
+        skillToolMap.set(t.metadata.name, t);
+      }
+    }
+
     for (const tc of toolCalls) {
       if (this.hooks?.onBeforeToolCall) {
         await this.hooks.onBeforeToolCall(tc.name, tc.args);
       }
 
-      const tool = this.config.tools.get(tc.name);
+      const tool = this.resolveTool(tc.name, skillToolMap);
       let resultContent: string;
       let isError = false;
 
@@ -389,6 +498,15 @@ export class DefaultAgent implements Agent {
     streaming?: boolean,
     onEvent?: (event: AgentStreamEvent) => void
   ): Promise<void> {
+    // 构建技能映射，合并到工具注册表引用
+    const skillToolMap = new Map<string, Tool>();
+    if (this.config.skillLoader) {
+      const skillTools = this.config.skillLoader.getActiveTools();
+      for (const t of skillTools) {
+        skillToolMap.set(t.metadata.name, t);
+      }
+    }
+
     const calls = toolCalls.map((tc) => ({
       id: tc.id,
       name: tc.name,
@@ -401,13 +519,17 @@ export class DefaultAgent implements Agent {
       }
     }
 
+    // 为并行执行创建一个合并后的 ToolRegistry
+    const mergedRegistry = this.buildMergedToolRegistry(skillToolMap);
+
     const result = await executeToolsParallel(
-      this.config.tools,
+      mergedRegistry,
       calls,
       this.config.parallelExecution
     );
 
     for (const tc of toolCalls) {
+      // 同样在并行执行后的结果处理中，需要先解析 skill 工具
       const toolResult = result.results.get(tc.id);
       const failure = result.failures.find((f) => f.id === tc.id);
 

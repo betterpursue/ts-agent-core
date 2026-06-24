@@ -8,7 +8,9 @@
  */
 
 import type { Message } from './message.js';
-import type { ToolRegistry } from './tool.js';
+import type { Tool, ToolRegistry } from './tool.js';
+import type { ToolMetadata } from './tool.js';
+import type { SkillSummary } from '../skill/skill.js';
 import type { MemorySystem, MemoryInjector, MemoryInjectionConfig } from './memory.js';
 import type { ModelConfig } from './llm.js';
 import type { PersistentSession, CheckpointManager, CheckpointTrigger } from './session.js';
@@ -24,6 +26,35 @@ export interface ParallelExecutionOptions {
   failFast?: boolean;
   /** 启用依赖冲突检测和分层并行（默认 true） */
   enableConflictDetection?: boolean;
+}
+
+/**
+ * Skill 加载器接口 —— Agent 集成 Skill 系统的桥梁
+ *
+ * 设计目的：
+ * - 对 Agent 屏蔽 ProgressiveSkillLoader 的复杂性
+ * - 只在 Agent 需要时暴露三个核心方法
+ * - 方便后续替换为其他加载策略
+ *
+ * 实现方：
+ * - ProgressiveSkillLoader（搭建时的标准实现）
+ * - 自定义加载器（例如基于 Embedding 的语义匹配）
+ */
+export interface SkillLoader {
+  /** 获取所有 Skill 的摘要（构建第一层信息） */
+  getSkillSummaries(): SkillSummary[];
+
+  /** 根据查询文本自动选择并激活相关的 Skill */
+  selectAndActivate(query: string): Promise<void>;
+
+  /** 获取当前已激活 Skill 的工具列表 */
+  getActiveTools(): Tool[];
+
+  /** 获取当前已激活的 Skill 名称列表 */
+  getActiveSkillNames(): string[];
+
+  /** 获取当前已激活工具的原数据（给 LLM 的 function calling schema） */
+  getActiveToolMetadatas(): ToolMetadata[];
 }
 
 /** Agent 配置 */
@@ -52,6 +83,16 @@ export interface AgentConfig {
     checkpoints?: CheckpointManager;
     checkpointTrigger?: CheckpointTrigger;
   };
+
+  /**
+   * Skill 加载器（可选）
+   *
+   * 配置后 Agent 不再一次性向 LLM 暴露所有工具的 schema，
+   * 而是先展示 Skill 摘要，按需激活后再暴露对应的工具。
+   *
+   * 不配置则保持原有的扁平 ToolRegistry 行为，向下兼容。
+   */
+  skillLoader?: SkillLoader;
 }
 
 /** Agent 生命周期钩子 —— 扩展点 */

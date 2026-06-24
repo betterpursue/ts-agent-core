@@ -382,6 +382,42 @@ export class ProgressiveSkillLoader {
     return expired;
   }
 
+  /**
+   * 根据查询文本自动选择并激活相关 Skill
+   *
+   * 这是给 Agent 的便捷入口：一句调用完成「选择 + 激活」两步。
+   * 激活后通过 getActiveTools() 获取工具列表。
+   * 同时自动停用当前激活但本次未被选中的 Skill。
+   */
+  async selectAndActivate(query: string): Promise<void> {
+    const selected = this.selectSkills(query);
+
+    // 去重激活：已经激活的不重复 init，只刷新时间戳
+    for (const skill of selected) {
+      if (this.activeSkills.has(skill.metadata.name)) {
+        this.activeSkills.get(skill.metadata.name)!.activatedAt = Date.now();
+      } else {
+        await this.activate(skill);
+      }
+    }
+
+    // 停用不相关的 Skill：当前激活但未被本次查询选中的
+    const selectedNames = new Set(selected.map((s) => s.metadata.name));
+    for (const name of this.getActiveSkillNames()) {
+      if (!selectedNames.has(name)) {
+        await this.deactivate(name);
+      }
+    }
+  }
+
+  /**
+   * 获取当前已激活工具的元数据（用于构建 LLM 的 function calling schema）
+   */
+  getActiveToolMetadatas(): import('../core/tool.js').ToolMetadata[] {
+    const tools = this.getActiveTools();
+    return tools.map((t) => t.metadata);
+  }
+
   // ─── 私有方法 ──────────────────────────────────────────────────
 
   /**
