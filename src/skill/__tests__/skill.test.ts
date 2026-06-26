@@ -230,7 +230,7 @@ describe('ProgressiveSkillLoader', () => {
   });
 
   describe('selectSkills()', () => {
-    it('returns matching skills sorted by relevance', () => {
+    it('returns matching skills sorted by relevance', async () => {
       const registry = new DefaultSkillRegistry();
       registry.register(createMockSkill({
         name: 'web-search',
@@ -244,14 +244,14 @@ describe('ProgressiveSkillLoader', () => {
       }));
 
       const loader = new ProgressiveSkillLoader(registry, { maxActiveSkills: 3 });
-      const selected = loader.selectSkills('search web browser');
+      const selected = await loader.selectSkills('search web browser');
 
       // web-search should rank higher because name + tags match
       expect(selected.length).toBeGreaterThanOrEqual(1);
       expect(selected[0].metadata.name).toBe('web-search');
     });
 
-    it('returns empty array when no skills match', () => {
+    it('returns empty array when no skills match', async () => {
       const registry = new DefaultSkillRegistry();
       registry.register(createMockSkill({
         name: 'math',
@@ -259,32 +259,32 @@ describe('ProgressiveSkillLoader', () => {
       }));
 
       const loader = new ProgressiveSkillLoader(registry);
-      const selected = loader.selectSkills('cooking recipe');
+      const selected = await loader.selectSkills('cooking recipe');
 
       expect(selected).toHaveLength(0);
     });
 
-    it('returns empty array for empty registry', () => {
+    it('returns empty array for empty registry', async () => {
       const registry = new DefaultSkillRegistry();
       const loader = new ProgressiveSkillLoader(registry);
 
-      expect(loader.selectSkills('anything')).toHaveLength(0);
+      expect(await loader.selectSkills('anything')).toHaveLength(0);
     });
 
-    it('respects maxActiveSkills limit in selection', () => {
+    it('respects maxActiveSkills limit in selection', async () => {
       const registry = new DefaultSkillRegistry();
       registry.register(createMockSkill({ name: 'a', tags: ['common'] }));
       registry.register(createMockSkill({ name: 'b', tags: ['common'] }));
       registry.register(createMockSkill({ name: 'c', tags: ['common'] }));
 
       const loader = new ProgressiveSkillLoader(registry, { maxActiveSkills: 2 });
-      const selected = loader.selectSkills('common');
+      const selected = await loader.selectSkills('common');
 
       // Only 2 skills max, even though all 3 match
       expect(selected.length).toBeLessThanOrEqual(2);
     });
 
-    it('matches by tag words', () => {
+    it('matches by tag words', async () => {
       const registry = new DefaultSkillRegistry();
       registry.register(createMockSkill({
         name: 'file-reader',
@@ -293,10 +293,131 @@ describe('ProgressiveSkillLoader', () => {
       }));
 
       const loader = new ProgressiveSkillLoader(registry);
-      const selected = loader.selectSkills('file');
+      const selected = await loader.selectSkills('file');
 
       expect(selected).toHaveLength(1);
       expect(selected[0].metadata.name).toBe('file-reader');
+    });
+
+    it('selects all skills when strategy is manual', async () => {
+      const registry = new DefaultSkillRegistry();
+      registry.register(createMockSkill({ name: 'a' }));
+      registry.register(createMockSkill({ name: 'b' }));
+
+      const loader = new ProgressiveSkillLoader(registry, {
+        selectionStrategy: 'manual',
+      });
+      const selected = await loader.selectSkills('anything');
+
+      expect(selected).toHaveLength(2);
+      const names = selected.map((s) => s.metadata.name).sort();
+      expect(names).toEqual(['a', 'b']);
+    });
+
+    it('selects skills by semantic similarity', async () => {
+      const registry = new DefaultSkillRegistry();
+      registry.register(
+        createMockSkill({
+          name: 'web-search',
+          description: 'Search the web for information',
+          tags: ['web', 'search'],
+        })
+      );
+      registry.register(
+        createMockSkill({
+          name: 'calculator',
+          description: 'Perform arithmetic calculations',
+          tags: ['math', 'calc'],
+        })
+      );
+
+      const mockEmbed = vi.fn().mockImplementation(async (text: string) => {
+        // 用简单规则模拟 embedding：让 web-search 与 web 查询更相似
+        if (text.includes('web') || text.includes('search')) {
+          return [1, 0];
+        }
+        if (text.includes('math') || text.includes('calculate')) {
+          return [0, 1];
+        }
+        // 默认向量
+        return [0.5, 0.5];
+      });
+
+      const loader = new ProgressiveSkillLoader(
+        registry,
+        {
+          selectionStrategy: 'semantic',
+          embeddingProvider: {
+            name: 'mock-embed',
+            embed: mockEmbed,
+            embedMany: async (texts) => Promise.all(texts.map((t) => mockEmbed(t))),
+          },
+        }
+      );
+
+      const selected = await loader.selectSkills('search web pages');
+
+      expect(selected).toHaveLength(1);
+      expect(selected[0].metadata.name).toBe('web-search');
+    });
+
+    it('caches skill embeddings across multiple selects', async () => {
+      const registry = new DefaultSkillRegistry();
+      registry.register(
+        createMockSkill({
+          name: 'search',
+          description: 'Search information',
+          tags: ['search'],
+        })
+      );
+
+      const mockEmbed = vi.fn().mockResolvedValue([1, 0]);
+
+      const loader = new ProgressiveSkillLoader(
+        registry,
+        {
+          selectionStrategy: 'semantic',
+          embeddingProvider: {
+            name: 'mock-embed',
+            embed: mockEmbed,
+            embedMany: async (texts) => texts.map(() => [1, 0]),
+          },
+        }
+      );
+
+      // 第一次调用：1 次 embedMany（skill embedding，不走 mockEmbed）+ 1 次 embed（query embedding）
+      await loader.selectSkills('search');
+      // 第二次调用：0 次 embedMany（缓存命中）+ 1 次 embed（query embedding）
+      await loader.selectSkills('find information');
+
+      // mockEmbed 只追踪 embed 调用：2 次
+      expect(mockEmbed).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns empty array when semantic scores are non-positive', async () => {
+      const registry = new DefaultSkillRegistry();
+      registry.register(
+        createMockSkill({
+          name: 'math',
+          description: 'Math calculations',
+          tags: ['math'],
+        })
+      );
+
+      const loader = new ProgressiveSkillLoader(
+        registry,
+        {
+          selectionStrategy: 'semantic',
+          embeddingProvider: {
+            name: 'mock-embed',
+            embed: async () => [0, 0],
+            embedMany: async () => [[0, 0]],
+          },
+        }
+      );
+
+      const selected = await loader.selectSkills('cooking recipe');
+      expect(selected).toHaveLength(0);
     });
   });
 

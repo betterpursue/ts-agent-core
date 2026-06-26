@@ -188,7 +188,18 @@ export interface ProgressiveLoaderConfig {
   /** Skill 激活超时（ms），超时后自动卸载 */
   activationTimeoutMs?: number;
   /** 选择策略 */
-  selectionStrategy?: 'relevance' | 'manual';
+  selectionStrategy?: 'relevance' | 'manual' | 'semantic';
+  /**
+   * Embedding Provider（仅 selectionStrategy 为 'semantic' 时需要）
+   *
+   * 为了不引入 circular dependency，这里定义最小接口。
+   * 可以直接传入 memory 模块的 EmbeddingProvider 实例。
+   */
+  embeddingProvider?: {
+    readonly name: string;
+    embed(text: string): Promise<number[]>;
+    embedMany(texts: string[]): Promise<number[][]>;
+  };
 }
 
 /**
@@ -218,6 +229,7 @@ export class ProgressiveSkillLoader {
   private registry: SkillRegistry;
   private config: Required<ProgressiveLoaderConfig>;
   private activeSkills = new Map<string, ActiveSkillRecord>();
+  private embeddingCache = new Map<string, number[]>();
 
   constructor(registry: SkillRegistry, config?: ProgressiveLoaderConfig) {
     this.registry = registry;
@@ -225,6 +237,11 @@ export class ProgressiveSkillLoader {
       maxActiveSkills: config?.maxActiveSkills ?? 3,
       activationTimeoutMs: config?.activationTimeoutMs ?? 30 * 60 * 1000, // 30 分钟
       selectionStrategy: config?.selectionStrategy ?? 'relevance',
+      embeddingProvider: config?.embeddingProvider ?? {
+        name: 'noop',
+        embed: async () => [],
+        embedMany: async () => [],
+      },
     };
   }
 
@@ -245,13 +262,22 @@ export class ProgressiveSkillLoader {
    * 选择策略：
    * - 'relevance'：基于查询文本与 Skill 名称/标签/描述的关键词匹配度排序
    * - 'manual'：返回所有已注册 Skill，由外部手动指定激活
+   * - 'semantic'：基于 Embedding 余弦相似度排序，需要配置 embeddingProvider
    *
    * 匹配维度：
    * 1. Skill 名称包含查询词（权重 2）
    * 2. 标签匹配查询词（权重 1）
    * 3. 描述中的关键词匹配（权重 0.5）
    */
-  selectSkills(query: string): Skill[] {
+  async selectSkills(query: string): Promise<Skill[]> {
+    if (this.config.selectionStrategy === 'semantic') {
+      return this.selectSkillsSemantic(query);
+    }
+
+    if (this.config.selectionStrategy === 'manual') {
+      return this.registry.list().map((meta) => this.registry.get(meta.name)!);
+    }
+
     const allSkills = this.registry.list();
     const scored = allSkills.map((meta) => {
       const skill = this.registry.get(meta.name)!;
@@ -261,6 +287,80 @@ export class ProgressiveSkillLoader {
 
     scored.sort((a, b) => b.score - a.score);
 
+    return scored
+      .filter((s) => s.score > 0)
+      .slice(0, this.config.maxActiveSkills)
+      .map((s) => s.skill);
+  }
+
+  /**
+   * 基于 Embedding 语义相似度选择 Skill
+   *
+   * 将 Skill 的 name + description + tags 拼接成文本，
+   * 与用户查询文本分别做 embedding，然后计算余弦相似度。
+   *
+   * 缓存策略：
+   * - Skill embedding 只计算一次，缓存在 embeddingCache 中
+   * - 查询 embedding 不缓存（每次查询都不同）
+   */
+  private async selectSkillsSemantic(query: string): Promise<Skill[]> {
+    const allSkills = this.registry.list();
+    if (allSkills.length === 0) return [];
+
+    const provider = this.config.embeddingProvider;
+
+    if (!provider || provider.name === 'noop') {
+      console.warn(
+        '[ProgressiveSkillLoader] Semantic strategy selected but no embedding provider configured. ' +
+        'Falling back to empty results. Configure embeddingProvider to enable semantic selection.'
+      );
+      return [];
+    }
+
+    // 准备 Skill 文本和 embedding
+    const skillTexts = allSkills.map((meta) =>
+      [meta.name, meta.description, ...meta.tags].join(' ').trim()
+    );
+
+    // 批量获取 Skill embedding（缓存命中则跳过）
+    const skillEmbeddings: number[][] = [];
+    const uncachedIndices: number[] = [];
+    const uncachedTexts: string[] = [];
+
+    for (let i = 0; i < allSkills.length; i++) {
+      const cached = this.embeddingCache.get(allSkills[i].name);
+      if (cached) {
+        skillEmbeddings[i] = cached;
+      } else {
+        uncachedIndices.push(i);
+        uncachedTexts.push(skillTexts[i]);
+      }
+    }
+
+    if (uncachedTexts.length > 0) {
+      const embeddings = await provider.embedMany(uncachedTexts);
+      for (let j = 0; j < uncachedIndices.length; j++) {
+        const idx = uncachedIndices[j];
+        skillEmbeddings[idx] = embeddings[j];
+        this.embeddingCache.set(allSkills[idx].name, embeddings[j]);
+      }
+    }
+
+    // 获取查询 embedding
+    const queryEmbedding = await provider.embed(query);
+
+    // 计算相似度并排序
+    const scored: { skill: Skill; score: number }[] = [];
+    for (let i = 0; i < allSkills.length; i++) {
+      const skill = this.registry.get(allSkills[i].name);
+      if (!skill) continue;
+      const score = cosineSimilarity(skillEmbeddings[i], queryEmbedding);
+      scored.push({ skill, score });
+    }
+
+    scored.sort((a, b) => b.score - a.score);
+
+    // 过滤掉相似度为负或零的（语义完全不相关）
     return scored
       .filter((s) => s.score > 0)
       .slice(0, this.config.maxActiveSkills)
@@ -390,7 +490,7 @@ export class ProgressiveSkillLoader {
    * 同时自动停用当前激活但本次未被选中的 Skill。
    */
   async selectAndActivate(query: string): Promise<void> {
-    const selected = this.selectSkills(query);
+    const selected = await this.selectSkills(query);
 
     // 去重激活：已经激活的不重复 init，只刷新时间戳
     for (const skill of selected) {
@@ -481,4 +581,38 @@ export class ProgressiveSkillLoader {
       await this.deactivate(oldestName);
     }
   }
+}
+
+// ─── 工具函数 ─────────────────────────────────────────────────────
+
+/**
+ * 余弦相似度 —— 衡量两个向量在方向上的靠近程度
+ *
+ * 公式：cos(θ) = (A · B) / (|A| × |B|)
+ *
+ * 与 memory 模块的 cosineSimilarity 实现一致，
+ * 但为了避免 skill 模块引入 memory 依赖，这里独立实现。
+ */
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length) {
+    throw new Error(
+      `Dimension mismatch for cosine similarity: ${a.length} vs ${b.length}`
+    );
+  }
+
+  let dotProduct = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dotProduct += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  if (denominator === 0) return 0;
+
+  const raw = dotProduct / denominator;
+  return Math.max(-1, Math.min(1, raw));
 }
