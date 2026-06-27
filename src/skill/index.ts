@@ -26,3 +26,15 @@ export {
   groupToolsByPrefix,
   ToolRegistryAdapter,
 } from './tool-adapter.js';
+
+export type {
+  ComposedSkillOptions,
+  SkillDependency,
+  SkillChainConfig,
+} from './composition.js';
+
+export {
+  composedSkill,
+  SkillChain,
+  validateChainDependencies,
+} from './composition.js';
