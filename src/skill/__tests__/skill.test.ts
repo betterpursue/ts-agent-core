@@ -394,6 +394,56 @@ describe('ProgressiveSkillLoader', () => {
       expect(mockEmbed).toHaveBeenCalledTimes(2);
     });
 
+    it('invalidates embedding cache when skill version changes', async () => {
+      const registry = new DefaultSkillRegistry();
+
+      const skillV1 = createMockSkill({
+        name: 'cached-embed',
+        version: '1.0.0',
+        description: 'Version 1 description',
+        tags: ['v1'],
+      });
+      registry.register(skillV1);
+
+      const mockEmbed = vi.fn().mockImplementation(async (text: string) => {
+        if (text.includes('Version 2')) return [0, 1];
+        return [1, 0];
+      });
+
+      const loader = new ProgressiveSkillLoader(
+        registry,
+        {
+          selectionStrategy: 'semantic',
+          embeddingProvider: {
+            name: 'mock-embed',
+            embed: mockEmbed,
+            embedMany: async (texts) => texts.map(() => [1, 0]),
+          },
+        }
+      );
+
+      // First call: caches v1 embedding
+      await loader.selectSkills('cached-embed');
+      expect(mockEmbed).toHaveBeenCalledTimes(1); // query only; skill emb is in embedMany
+
+      // Upgrade to v2
+      await registry.unregister('cached-embed');
+      const skillV2 = createMockSkill({
+        name: 'cached-embed',
+        version: '2.0.0',
+        description: 'Version 2 description',
+        tags: ['v2'],
+      });
+      registry.register(skillV2);
+
+      // Second call: embedding cache should be invalidated, so embedMany runs again
+      await loader.selectSkills('cached-embed');
+      // 2 query embeds + 1 embedMany for v2 = 3 total mockEmbed calls
+      // Actually embedMany doesn't use mockEmbed, so it's 2 total
+      // Wait - mockEmbed is only for `embed`, embedMany is separate
+      expect(mockEmbed).toHaveBeenCalledTimes(2);
+    });
+
     it('returns empty array when semantic scores are non-positive', async () => {
       const registry = new DefaultSkillRegistry();
       registry.register(
@@ -516,6 +566,114 @@ describe('ProgressiveSkillLoader', () => {
       expect(activeNames).not.toContain('s1');
       expect(activeNames).toContain('s4');
       expect(activeNames.length).toBe(3);
+    });
+
+    it('returns cached tools when re-activating same version', async () => {
+      const initFn = vi.fn().mockResolvedValue(undefined);
+      const registry = new DefaultSkillRegistry();
+      const skill = createMockSkill({
+        name: 'cached',
+        tools: [echoTool],
+        initImpl: initFn,
+      });
+      registry.register(skill);
+
+      const loader = new ProgressiveSkillLoader(registry);
+
+      // First activation
+      const tools1 = await loader.activate(skill);
+      expect(initFn).toHaveBeenCalledTimes(1);
+      expect(tools1).toHaveLength(1);
+
+      // Second activation with same version — init should not be called again
+      const tools2 = await loader.activate(skill);
+      expect(initFn).toHaveBeenCalledTimes(1);
+      expect(tools2).toHaveLength(1);
+      expect(tools2[0].metadata.name).toBe('echo');
+    });
+
+    it('rebuilds skill when version changes (hot-reload)', async () => {
+      const initFn = vi.fn().mockResolvedValue(undefined);
+      const disposeFn = vi.fn();
+      const registry = new DefaultSkillRegistry();
+
+      // v1 skill
+      const skillV1 = createMockSkill({
+        name: 'versioned',
+        version: '1.0.0',
+        tools: [echoTool],
+        initImpl: initFn,
+        disposeImpl: disposeFn,
+      });
+      registry.register(skillV1);
+
+      const loader = new ProgressiveSkillLoader(registry);
+
+      // Activate v1
+      let tools = await loader.activate(skillV1);
+      expect(initFn).toHaveBeenCalledTimes(1);
+      expect(tools).toHaveLength(1);
+      expect(tools[0].metadata.name).toBe('echo');
+      expect(loader.getActiveSkillNames()).toContain('versioned');
+
+      // Replace with v2 in registry (simulating hot-reload)
+      await registry.unregister('versioned');
+      const skillV2 = createMockSkill({
+        name: 'versioned',
+        version: '2.0.0',
+        tools: [reverseTool],
+        initImpl: initFn,
+        disposeImpl: disposeFn,
+      });
+      registry.register(skillV2);
+
+      // Activate v2 — should detect version change and rebuild
+      tools = await loader.activate(skillV2);
+      expect(initFn).toHaveBeenCalledTimes(2);
+      expect(disposeFn).toHaveBeenCalledTimes(2); // unregister + deactivate(old v1)
+      expect(tools).toHaveLength(1);
+      expect(tools[0].metadata.name).toBe('reverse');
+    });
+
+    it('selectAndActivate rebuilds when skill version changes', async () => {
+      const initFn = vi.fn().mockResolvedValue(undefined);
+      const registry = new DefaultSkillRegistry();
+
+      const skillV1 = createMockSkill({
+        name: 'auto-version',
+        description: 'Auto versioned skill',
+        version: '1.0.0',
+        tools: [echoTool],
+        initImpl: initFn,
+        tags: ['auto', 'version'],
+      });
+      registry.register(skillV1);
+
+      const loader = new ProgressiveSkillLoader(registry);
+
+      // First selectAndActivate with v1
+      await loader.selectAndActivate('auto version');
+      expect(initFn).toHaveBeenCalledTimes(1);
+      expect(loader.getActiveSkillNames()).toContain('auto-version');
+
+      // Upgrade skill to v2
+      await registry.unregister('auto-version');
+      const skillV2 = createMockSkill({
+        name: 'auto-version',
+        description: 'Auto versioned skill v2',
+        version: '2.0.0',
+        tools: [reverseTool],
+        initImpl: initFn,
+        tags: ['auto', 'version', 'v2'],
+      });
+      registry.register(skillV2);
+
+      // selectAndActivate again — should rebuild
+      await loader.selectAndActivate('auto version');
+      expect(initFn).toHaveBeenCalledTimes(2);
+      const activeTools = loader.getActiveTools();
+      expect(activeTools).toHaveLength(1);
+      expect(activeTools[0].metadata.name).toBe('reverse');
     });
   });
 

@@ -376,14 +376,24 @@ export class ProgressiveSkillLoader {
    * 3. 调用 skill.init()（如果存在）
    * 4. 调用 skill.getTools() 缓存工具列表
    *
+   * 热更新支持：
+   * 如果 Skill 已经在激活列表中，但 registry 返回的实例版本与缓存的版本不同，
+   * 会先停用旧实例（调用 dispose），再用新实例重新激活。
+   *
    * @returns 激活 Skill 包含的 Tool 列表
    */
   async activate(skill: Skill): Promise<Tool[]> {
-    // 已经激活，直接返回缓存（浅拷贝防止外部修改缓存）
     const existing = this.activeSkills.get(skill.metadata.name);
     if (existing) {
-      existing.activatedAt = Date.now();
-      return [...existing.tools];
+      // 版本不一致：Skill 实现已更新，需要热更新
+      if (existing.skill.metadata.version !== skill.metadata.version) {
+        // 停用旧实例并清理 embedding 缓存
+        this.embeddingCache.delete(skill.metadata.name);
+        await this.deactivate(skill.metadata.name);
+      } else {
+        existing.activatedAt = Date.now();
+        return [...existing.tools];
+      }
     }
 
     // 超出上限，淘汰最老的
@@ -492,13 +502,9 @@ export class ProgressiveSkillLoader {
   async selectAndActivate(query: string): Promise<void> {
     const selected = await this.selectSkills(query);
 
-    // 去重激活：已经激活的不重复 init，只刷新时间戳
+    // 统一走 activate，让版本检测和缓存刷新在 activate 内部处理
     for (const skill of selected) {
-      if (this.activeSkills.has(skill.metadata.name)) {
-        this.activeSkills.get(skill.metadata.name)!.activatedAt = Date.now();
-      } else {
-        await this.activate(skill);
-      }
+      await this.activate(skill);
     }
 
     // 停用不相关的 Skill：当前激活但未被本次查询选中的
